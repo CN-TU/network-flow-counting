@@ -12,7 +12,7 @@ import argparse
 from tqdm import tqdm
 from datetime import datetime
 from matplotlib import pyplot as plt
-from sklearn.preprocessing import MinMaxScaler, LabelEncoder
+from sklearn.preprocessing import MinMaxScaler, LabelEncoder, StandardScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from keras.models import Sequential, load_model
 from keras.layers import Dense, LSTM, Dropout, LeakyReLU
@@ -23,9 +23,25 @@ import tensorflow as tf
 import shap
 from collections import Counter
 import random
+import _pickle as cPickle
 
-# make sure the gpu is used
-sess = tf.compat.v1.Session(config=tf.compat.v1.ConfigProto(log_device_placement=True))
+# TODOS:
+# change str concatenation to PATH
+
+# # make sure the gpu is used
+# sess = tf.compat.v1.Session(config=tf.compat.v1.ConfigProto(log_device_placement=True))
+
+# # make tf uses memory as needed and not everything
+# gpus = tf.config.experimental.list_physical_devices('GPU')
+# if gpus:
+#   try:
+#     for gpu in gpus:
+#       tf.config.experimental.set_memory_growth(gpu, True)
+#   except RuntimeError as e:
+#     print(e)
+
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 FEATURES = ['ipTotalLength', 'iat', 'flowDirection']
@@ -81,14 +97,42 @@ def scale_count(sequences, labels, log=True):
 	if log:
 		s[1] = _log_scale(s[1])
 	# 1.b scale the rest of the features
-	scalers = MinMaxScaler(feature_range=(0, 1))
-	scaled_s = scalers.fit_transform(s)
+	if opt.data_scaler:
+		with open(opt.data_scaler, "rb") as input_file:
+			print('>> data scaler found')
+			scalers = cPickle.load(input_file)
+	else:
+		if not path.exists('{}/data_scaler'.format(opt.working_dir)) or opt.reset_scalers:
+			scalers = StandardScaler(with_mean=True, with_std=True)
+			scaled_s = scalers.fit(s)
+			with open('{}/data_scaler'.format(opt.working_dir), "wb") as output_file:
+				cPickle.dump(scalers, output_file)
+				print('>> data scaler saved')
+		else:
+			with open('{}/data_scaler'.format(opt.working_dir), "rb") as input_file:
+				print('>> data scaler found')
+				scalers = cPickle.load(input_file)
+	scaled_s = scalers.transform(s)
 	scaled_sequences = scaled_s.reshape((n_lines, opt.window, N_FEATURES))
 
 	# 2. scale the labels
 	l = labels.reshape((n_lines*opt.window, 1))
-	scalerl = MinMaxScaler(feature_range=(0, 1))
-	scaled_l = scalerl.fit_transform(l)
+	if opt.label_scaler:
+		with open(opt.label_scaler, "rb") as input_file:
+			print('>> labels scaler found')
+			scalerl = cPickle.load(input_file)
+	else:
+		if not path.exists('{}/label_scaler'.format(opt.working_dir)) or opt.reset_scalers:
+			scalerl = MinMaxScaler(feature_range=(0, 1))
+			scaled_l = scalerl.fit(l)
+			with open('{}/label_scaler'.format(opt.working_dir), "wb") as output_file:
+				cPickle.dump(scalerl, output_file)
+				print('>> labels scaler saved')
+		else:
+			with open('{}/label_scaler'.format(opt.working_dir), "rb") as input_file:
+				print('>> labels scaler found')
+				scalerl = cPickle.load(input_file)
+	scaled_l = scalerl.transform(l)
 	scaled_labels = scaled_l.reshape((n_lines, opt.window))
 	return scaled_sequences, scaled_labels, scalers, scalerl
 
@@ -115,17 +159,53 @@ def lstm_count_2():
 	model.compile(loss='mae', optimizer='adam')
 	return model
 
+def lstm_count_3():
+	# 3rd test network
+	model = Sequential()
+	model.add(LSTM(128, activation='tanh', return_sequences=True, input_shape=(scaled_sequences.shape[1], scaled_sequences.shape[2])))
+	model.add(LeakyReLU())
+	model.add(Dropout(0.2))
+	model.add(LSTM(64, return_sequences=True, activation='tanh'))
+	model.add(Dropout(0.2))
+	model.add(LeakyReLU())
+	model.add(LSTM(32, return_sequences=True, activation='tanh'))
+	model.add(LeakyReLU())
+	model.add(Dense(1, activation='sigmoid'))
+	model.compile(loss='mae', optimizer='adam')
+	return model
+
 def plot_distributions(model, X_test, y_test, scaler_l):
-	# plot similarity histogram and marginal error
-	# FIXME
+	# plot similarity histogram and NMAE
 	predicted_labels = _back_scaling(model.predict(X_test), scaler_l.data_min_, scaler_l.data_max_)
 	true_labels = _back_scaling(y_test, scaler_l.data_min_, scaler_l.data_max_)
-	plt.figure()
-	plt.hist(np.round(predicted_labels[:,opt.window-1,:]), bins=opt.window, label='Predicted counts')
-	plt.hist(true_labels[:,opt.window-1,:], bins=opt.window, alpha=0.7, label='Original counts')
-	plt.xlabel('Flows in a window')
-	plt.ylabel('Count')
-	plt.legend()
+	
+	# compute nmae for each value
+	res = {}
+	res_f = {}
+	for index, value in enumerate(predicted_labels[:,opt.window-1,:]):
+	    if int(true_labels[index, opt.window-1,0]) in res:
+	        res[int(true_labels[index,opt.window-1,0])].append(np.abs(predicted_labels[index,opt.window-1,0] - true_labels[index,opt.window-1,0])/true_labels[index,opt.window-1,0])
+	    else:
+	        res[int(true_labels[index,opt.window-1,0])] = [np.abs(predicted_labels[index,opt.window-1,0] - true_labels[index,opt.window-1,0])/true_labels[index,opt.window-1,0]]
+	for i,j in res.items():
+	    res_f[i] = np.sum(j)/len(j)*100
+	lists = sorted(res_f.items())
+	x, y = zip(*lists)
+
+	fig, ax1 = plt.subplots(figsize=(3.5,2.5))
+	plt.grid(alpha=0.2)
+	ax1.set_xlabel('# Flows / Sequence')
+	ax1.set_ylabel('Count')
+	ax1.hist(true_labels[:,opt.window-1,:], bins=20, alpha=0.7, label='Original counts')
+	ax1.hist(np.round(predicted_labels[:,opt.window-1,:]), bins=20, label='Predicted counts')
+
+	ax2 = ax1.twinx()
+	color = 'tab:red'
+	ax2.set_ylabel('NMAE (%)', color=color)
+	ax2.plot(x,y, color=color, label='NMAE (%)', linestyle='--', linewidth=2, alpha = 0.7)
+	ax2.tick_params(axis='y', labelcolor=color)
+	ax1.legend()
+	fig.tight_layout()
 	plt.savefig("count_performance_{}_{}.pdf".format(opt.window, datetime.now().strftime("%Y%m%d-%H%M%S")), bbox_inches='tight')
 
 def get_metrics(model, X_test, y_test, scaler_l):
@@ -162,7 +242,8 @@ def plot_perturbation(model, X, scaler_s):
 	            tmp = X.copy()
 	            # consider that the features are log scalled when performing the change
 	            # thus, scale also the change
-	            tmp[:, t, feature] = X[:, t, feature] + np.log(1+change)/(scaler_s.data_max_[feature] - scaler_s.data_min_[feature])#*(1+change)
+	            #tmp[:, t, feature] = X[:, t, feature] + np.log(1+change)/(scaler_s.data_max_[feature] - scaler_s.data_min_[feature])# case of minmax scaling
+	            tmp[:, t, feature] = X[:, t, feature] + np.log(1+change)/(np.sqrt(scaler_s.var_[feature]))# case of std scaling
 	            pred = model.predict(tmp)
 	            #relative_error += np.abs(pred[:,t,0] - p[:,t,0])/p[:,t,0]
 	            #final_error += np.abs(pred[:,-1,0] - p[:,-1,0])/p[:,-1,0]
@@ -226,6 +307,7 @@ def fix_direction(x):
 if __name__=="__main__":
 
 	parser = argparse.ArgumentParser()
+	parser.add_argument('--working_dir', default='countv2', help='task to execute')
 	parser.add_argument('--task', required=True, help='task to execute')
 	parser.add_argument('--dataroot', help='path to dataset')
 	parser.add_argument('--window', type=int, default=100, help='window size to scan for number of flows')
@@ -235,6 +317,9 @@ if __name__=="__main__":
 	parser.add_argument('--plot', help='which plot to create (coma separated) [hist, perturbations]')
 	parser.add_argument('--external_data', action='store_true')
 	parser.add_argument('--evaluate', action='store_true')
+	parser.add_argument('--label_scaler', help='path to label scaler object')
+	parser.add_argument('--data_scaler', help='path to data scaler object')
+	parser.add_argument('--reset_scalers', action='store_true')
 
 	opt = parser.parse_args()
 
@@ -245,20 +330,20 @@ if __name__=="__main__":
 		data[FEATURES[2]] = data[FEATURES[2]].apply(fix_direction)
 
 	if opt.task == "count":
-		if not path.exists('countv2/{}_sequences_count.npy'.format(opt.window)) or opt.external_data:
+		if not path.exists('{}/{}_sequences_count.npy'.format(opt.working_dir, opt.window)) or opt.external_data:
 			print('>> Generating Sequences ########')
 			sequences, label_sequences = generate_sequences_count()
 			sequences = np.array(sequences)
 			label_sequences = np.array(label_sequences)
 			print('Average flows/seq: {}'.format(np.mean(label_sequences[:,-1])))
 			if not opt.external_data:
-				np.save('countv2/{}_sequences_count.npy'.format(opt.window), sequences)
-				np.save('countv2/{}_label_sequences_count.npy'.format(opt.window), label_sequences)
+				np.save('{}/{}_sequences_count.npy'.format(opt.working_dir, opt.window), sequences)
+				np.save('{}/{}_label_sequences_count.npy'.format(opt.working_dir, opt.window), label_sequences)
 			del data
 		else:
 			print('>> Loading Sequences ########')
-			sequences = np.load('countv2/{}_sequences_count.npy'.format(opt.window))
-			label_sequences = np.load('countv2/{}_label_sequences_count.npy'.format(opt.window))
+			sequences = np.load('{}/{}_sequences_count.npy'.format(opt.working_dir, opt.window))
+			label_sequences = np.load('{}/{}_label_sequences_count.npy'.format(opt.working_dir, opt.window))
 		print('>> Scaling the Data ########')
 		scaled_sequences, scaled_labels, scaler_s, scaler_l = scale_count(sequences, label_sequences)
 		# fix the labels so that we learn at each timestamp (batch, ts, features)
@@ -267,9 +352,9 @@ if __name__=="__main__":
 
 		if opt.function == 'train':
 			print('>> Preparing for Training ########')
-			model = lstm_count_2()
-			filepath = "countv2/saved-model-{epoch:02d}-{loss:.2f}-" + str(opt.window) + ".hdf5"
-			checkpoint = ModelCheckpoint(filepath, monitor='loss', verbose=1, save_best_only=False, mode='auto', period=1)
+			model = lstm_count_3()
+			filepath = opt.working_dir + "/saved-model-{epoch:02d}-{loss:.2f}-" + str(opt.window) + ".hdf5"
+			checkpoint = ModelCheckpoint(filepath, monitor='loss', verbose=1, save_best_only=True, mode='auto', period=1)
 			logdir = "../tf_logs/lstm/" + opt.task + str(opt.window) + datetime.now().strftime("%Y%m%d-%H%M%S")
 			tensorboard_callback = TensorBoard(log_dir=logdir)
 			model.fit(X_train, y_train, epochs=opt.epochs, batch_size=32, verbose=1, shuffle=False, callbacks=[checkpoint, tensorboard_callback])
@@ -280,7 +365,7 @@ if __name__=="__main__":
 
 		if opt.plot:
 			if 'hist' in opt.plot:
-				plot_distirbutions(model, X_test, y_test, scaler_l)
+				plot_distributions(model, X_test, y_test, scaler_l)
 			if 'perturbations' in opt.plot:
 				plot_perturbation(model, X_test, scaler_s)
 		if opt.evaluate:
