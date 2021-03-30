@@ -24,6 +24,7 @@ import shap
 from collections import Counter
 import random
 import _pickle as cPickle
+import scipy.stats as stats
 
 # TODOS:
 # change str concatenation to PATH
@@ -175,11 +176,11 @@ def lstm_count_3():
 	return model
 
 def plot_distributions(model, X_test, y_test, scaler_l):
-	# plot similarity histogram and NMAE
+	# plot similarity histogram and MAPE
 	predicted_labels = _back_scaling(model.predict(X_test), scaler_l.data_min_, scaler_l.data_max_)
 	true_labels = _back_scaling(y_test, scaler_l.data_min_, scaler_l.data_max_)
 	
-	# compute nmae for each value
+	# compute MAPE for each value
 	res = {}
 	res_f = {}
 	for index, value in enumerate(predicted_labels[:,opt.window-1,:]):
@@ -201,28 +202,76 @@ def plot_distributions(model, X_test, y_test, scaler_l):
 
 	ax2 = ax1.twinx()
 	color = 'tab:red'
-	ax2.set_ylabel('NMAE (%)', color=color)
-	ax2.plot(x,y, color=color, label='NMAE (%)', linestyle='--', linewidth=2, alpha = 0.7)
+	ax2.set_ylabel('MAPE (%)', color=color)
+	ax2.plot(x,y, color=color, label='MAPE (%)', linestyle='--', linewidth=2, alpha = 0.7)
 	ax2.tick_params(axis='y', labelcolor=color)
 	ax1.legend()
 	fig.tight_layout()
 	plt.savefig("count_performance_{}_{}.pdf".format(opt.window, datetime.now().strftime("%Y%m%d-%H%M%S")), bbox_inches='tight')
 
+def plot_errors(model, X_test, y_test, scaler_l):
+	# plot MAPEs
+	predicted_labels = _back_scaling(model.predict(X_test), scaler_l.data_min_, scaler_l.data_max_)
+	true_labels = _back_scaling(y_test, scaler_l.data_min_, scaler_l.data_max_)
+	
+	# compute mape for each value
+	res = {}
+	means = {}
+	stdvs = {}
+
+	for index, value in enumerate(predicted_labels[:,opt.window-1,:]):
+	    if int(true_labels[index, opt.window-1,0]) in res:
+	        res[int(true_labels[index,opt.window-1,0])].append(np.abs(predicted_labels[index,opt.window-1,0] - true_labels[index,opt.window-1,0])/true_labels[index,opt.window-1,0])
+	    else:
+	        res[int(true_labels[index,opt.window-1,0])] = [np.abs(predicted_labels[index,opt.window-1,0] - true_labels[index,opt.window-1,0])/true_labels[index,opt.window-1,0]]
+	for i,j in res.items():
+	    means[i] = np.sum(j)/len(j)*100
+	    stdvs[i] = np.std(j)*100
+	    
+	lists_means = sorted(means.items())
+	lists_stdvs = sorted(stdvs.items())
+	x1, y1 = zip(*lists_means)
+	x2, y2 = zip(*lists_stdvs)
+
+	density = stats.gaussian_kde(true_labels[:,opt.window-1,:].flatten())
+	s = np.sum(true_labels[:,opt.window-1,:].flatten())
+
+	fig = plt.figure(figsize=(3,2))
+	ax = fig.add_subplot(111)
+
+	ax.set_xlabel('# Flows / Sequence')
+
+	lns1 = ax.plot(x1, density(x1)*s, label='Counts')
+	ax2 = ax.twinx()
+	lns2 = ax2.plot(x1,y1, color='tab:red', label='MAPE (%)', linestyle='--', linewidth=2, alpha = 0.7)
+	lns2b = ax2.fill_between(x1, np.array(y1) - np.array(y2), np.array(y1) + np.array(y2), color='r', alpha=0.2)
+
+	lns = lns1+lns2
+	labs = [l.get_label() for l in lns]
+	ax.legend(lns, labs, loc=0)
+
+	ax.grid(alpha=0.4)
+	ax.set_xlabel('# Flows / Sequence')
+	ax.set_ylabel('Counts')
+	ax2.set_ylabel('MAPE (%)')
+	ax2.set_ylim(0, 100)
+	plt.savefig("errors_{}_{}.pdf".format(opt.window, datetime.now().strftime("%Y%m%d-%H%M%S")), bbox_inches='tight')
+
 def get_metrics(model, X_test, y_test, scaler_l):
 	predicted_labels = _back_scaling(model.predict(X_test), scaler_l.data_min_, scaler_l.data_max_)
 	true_labels = _back_scaling(y_test, scaler_l.data_min_, scaler_l.data_max_)
 	
-	print('NMAE: {}'.format(np.sum(np.abs(predicted_labels[:,opt.window-1,:].flatten() - true_labels[:,opt.window-1,:].flatten())/true_labels[:,opt.window-1,:].flatten())/len(true_labels[:,opt.window-1,:].flatten())))
-	print('NMAE-RG: {}'.format(np.sum(np.abs(random.choices(range(1, opt.window+1), k=true_labels.shape[0]) - true_labels[:,opt.window-1,:].flatten())/true_labels[:,opt.window-1,:].flatten())/len(true_labels[:,opt.window-1,:].flatten())))
+	print('>> MAPE: {}'.format(np.sum(np.abs(predicted_labels[:,opt.window-1,:].flatten() - true_labels[:,opt.window-1,:].flatten())/true_labels[:,opt.window-1,:].flatten())/len(true_labels[:,opt.window-1,:].flatten())))
+	#print('MAPE-RG: {}'.format(np.sum(np.abs(random.choices(range(1, opt.window+1), k=true_labels.shape[0]) - true_labels[:,opt.window-1,:].flatten())/true_labels[:,opt.window-1,:].flatten())/len(true_labels[:,opt.window-1,:].flatten())))
 	
-	print('R2: {}'.format(r2_score(true_labels[:,opt.window-1,:].flatten(), predicted_labels[:,opt.window-1,:], multioutput='variance_weighted')))
+	#print('R2: {}'.format(r2_score(true_labels[:,opt.window-1,:].flatten(), predicted_labels[:,opt.window-1,:], multioutput='variance_weighted')))
 	
 	mae = mean_absolute_error(true_labels[:,opt.window-1,:].flatten(), predicted_labels[:,opt.window-1,:])
-	#print('MSE: {}'.format(mse))
-	#print('MSE/MSEMG: {}'.format(mae/mean_absolute_error(Counter(true_labels[:,opt.window-1,:].flatten()).most_common(1)[0][0]*np.ones(true_labels.shape[0]), true_labels[:,opt.window-1,:].flatten())))
-	#print('MSE/MSERG: {}'.format(mae/mean_absolute_error(random.choices(true_labels[:,opt.window-1,:].flatten(), k=true_labels.shape[0]), true_labels[:,opt.window-1,:].flatten())))
-	#print('MSE/MSERSG: {}'.format(mae/mean_absolute_error(random.choices(np.unique(true_labels[:,opt.window-1,:].flatten()), k=true_labels.shape[0]), true_labels[:,opt.window-1,:].flatten())))
-	print('MAE/MAERSGA: {}'.format(mae/mean_absolute_error(true_labels[:,opt.window-1,:].flatten(), random.choices(range(1, opt.window+1), k=true_labels.shape[0]))))
+	print('>> MAE: {}'.format(mae))
+	#print('MAE/MAEMG: {}'.format(mae/mean_absolute_error(Counter(true_labels[:,opt.window-1,:].flatten()).most_common(1)[0][0]*np.ones(true_labels.shape[0]), true_labels[:,opt.window-1,:].flatten())))
+	#print('MAE/MAERG: {}'.format(mae/mean_absolute_error(random.choices(true_labels[:,opt.window-1,:].flatten(), k=true_labels.shape[0]), true_labels[:,opt.window-1,:].flatten())))
+	#print('MAE/MAERSG: {}'.format(mae/mean_absolute_error(random.choices(np.unique(true_labels[:,opt.window-1,:].flatten()), k=true_labels.shape[0]), true_labels[:,opt.window-1,:].flatten())))
+	#print('MAE/MAERSGA: {}'.format(mae/mean_absolute_error(true_labels[:,opt.window-1,:].flatten(), random.choices(range(1, opt.window+1), k=true_labels.shape[0]))))
 
 def plot_perturbation(model, X, scaler_s):
 	step = 1
@@ -368,6 +417,8 @@ if __name__=="__main__":
 				plot_distributions(model, X_test, y_test, scaler_l)
 			if 'perturbations' in opt.plot:
 				plot_perturbation(model, X_test, scaler_s)
+			if 'errors' in opt.plot:
+				plot_errors(model, X_test, y_test, scaler_l)
 		if opt.evaluate:
 			get_metrics(model, X_test, y_test, scaler_l)
 			# in case we want all the data and not only the test partition
