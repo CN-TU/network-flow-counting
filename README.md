@@ -1,10 +1,12 @@
 # network-flow-counting
 Contact: Fares Meghdouri
+fares.meghdouri@tuwien.ac.at
 
-This repository contains the code and data for our paper **Unveiling Flows in the Dark: Analysis of Encrypted Tunnels**
+This repository contains the code and data for our paper **Shedding Light in the Tunnel: Counting Flows in Encrypted Network Traffic** published at ICDMW-DMC 2021
 
 # Datasets
-## Used in the Paper
+## Preprocessed
+(please contact the author)
 
 ## Extract Your Own Data
 Start by downloading the following pcap files: 
